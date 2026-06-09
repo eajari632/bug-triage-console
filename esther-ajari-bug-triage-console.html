@@ -1,0 +1,945 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Esther Ajari | Bug Triage Console</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:#f4f3f0;color:#1a1a1a;font-size:14px}
+input,select,textarea{font-family:inherit;font-size:13px;border:1px solid #ccc;border-radius:6px;padding:7px 10px;width:100%;background:#fff;color:#1a1a1a;outline:none}
+input:focus,select:focus,textarea:focus{border-color:#185FA5;box-shadow:0 0 0 2px rgba(24,95,165,0.12)}
+textarea{resize:vertical}
+button{font-family:inherit;cursor:pointer}
+code{font-family:monospace}
+.section-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#999;margin-bottom:6px;display:block}
+.card{background:#fff;border:1px solid #e5e5e3;border-radius:10px;padding:16px}
+.inline-tag{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:5px;border:1px solid}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState } = React;
+
+/* ─── DATA LAYER ────────────────────────────────────────────────── */
+
+const BUCKET_RULES = [
+  {
+    id: "STT", label: "STT (Speech-to-Text)",
+    why: "The report describes how audio is captured and converted to text. Recognition errors, transcript gaps, diarization failures, or language and accent mismatches all point here. The problem lives in the audio pipeline before any AI reasoning occurs.",
+    keywords: ["transcript","inaudible","recognition","mishear","misheard","hearing","accent","language","diarization","partial transcript","stt","hears","yes as no","'yes' as 'no'","spanish callers","habla","misunderstands spanish","responding in english","keeps responding in english"]
+  },
+  {
+    id: "TTS", label: "TTS (Text-to-Speech)",
+    why: "The report describes how the agent's voice sounds to the caller: quality, pronunciation, timing, or barge-in failures. The text output from the LLM may be correct; the rendering of that text into audio is where the problem is.",
+    keywords: ["voice sounds","robotic","garbled","pronunciation","barge-in","barge in","cuts off","voice cuts","tts","voice quality","number pronunciation","reads the amount","speak back","8-12 seconds","mid-sentence when the customer interrupts","voice response starts taking"]
+  },
+  {
+    id: "LLM", label: "LLM (AI Reasoning)",
+    why: "The report describes a failure of the agent's decision-making, intent handling, or knowledge. Looping, hallucinating, refusing, using wrong tools, or producing dangerous or non-compliant outputs all belong here. The audio pipeline is fine; the reasoning is wrong.",
+    keywords: ["repeats the same question","loop","looping","wrong intent","hallucination","refusal","bad reasoning","arrested","still insists","won't check","already paid","account lookup","tool use","bad account","agent told","sends people to","collections escalation","policy violation","insists they haven't","unlawful","threatening","non-compliant","illegal"]
+  },
+  {
+    id: "POST_CALL", label: "Post-call Process",
+    why: "The report describes something that fails after the call has ended: summaries not written, CRM not updated, disposition codes wrong, or webhook delivery failed. The live call experience was fine; post-processing broke.",
+    keywords: ["after the call","post-call","salesforce","crm","summary","disposition","call notes","webhook delivery","double-log","duplicate transaction","payment event","no summary","no notes","don't see notes","double logs"]
+  },
+  {
+    id: "INFRA", label: "Infrastructure",
+    why: "The report describes a systemic failure below the application layer: dialing errors, carrier issues, storage unavailability, database writes failing, webhook endpoints returning errors, or auth and rate-limit problems.",
+    keywords: ["500 error","webhook","/webhook/call-ended","dialing","dialed","never receives a ring","carrier connect","outage","storage","file not found","recording","database","auth","rate limit","nothing is saving","dropped to near zero","connect rate dropped","outbound attempts show"]
+  }
+];
+
+// Compliance/regulatory risk signals used for severity escalation
+// Compliance signals: only language that raises genuine legal, regulatory, or policy concerns.
+// Operational workflow terms (collections, escalation, routing) are intentionally excluded.
+const COMPLIANCE_SIGNALS = [
+  "arrested","arrest","jail","prison",
+  "unlawful","illegal","lawsuit","sue","court",
+  "threatening","threatened","coerce","coercion",
+  "harassment","harass","abusive",
+  "prohibited","policy violation","regulatory violation",
+  "deceptive","false statement","non-compliant"
+];
+
+const SEV_RULES = [
+  {
+    level: "Sev0", label: "Stop-ship / Outage",
+    color: "#A32D2D", bg: "#FCEBEB", border: "#F09595",
+    desc: "Agent cannot place or receive calls, widespread failures affecting all or most customers, critical data not being saved, or a compliance-impacting systemic issue. Requires immediate escalation and an active incident bridge.",
+    keywords: ["outage","nothing is saving","cannot place","cannot receive","dropped to near zero","500 error","widespread","carrier connect rate dropped","file not found for many"],
+    impactBoost: {Outage: 2}
+  },
+  {
+    level: "Sev1", label: "Major",
+    color: "#854F0B", bg: "#FAEEDA", border: "#FAC775",
+    desc: "Many calls affected with a materially broken experience: frequent failures, high customer impact, significant business risk. No reliable workaround. Requires same-day resolution.",
+    keywords: ["many callers","all calls","every call","always","keeps","every customer","policy violation","collections escalation","loop even after","double-log"],
+    impactBoost: {"Many callers": 1}
+  },
+  {
+    level: "Sev2", label: "Moderate",
+    color: "#3B6D11", bg: "#EAF3DE", border: "#C0DD97",
+    desc: "Intermittent or limited-scope issue affecting a subset of calls. A workaround may exist. Impacts some customers but the system remains broadly functional. Target fix within 2 to 3 business days.",
+    keywords: ["sometimes","intermittent","subset","long calls","certain","occasional","8-12 seconds"],
+    impactBoost: {"Single caller": -1}
+  },
+  {
+    level: "Sev3", label: "Minor",
+    color: "#534AB7", bg: "#EEEDFE", border: "#AFA9EC",
+    desc: "Cosmetic issue, edge-case confusion, or low-frequency problem with minimal customer impact. Does not materially affect call outcomes. Fix in next sprint.",
+    keywords: ["cosmetic","minor","edge case","low impact","one hundred twenty","number pronunciation","reads the amount as"]
+  }
+];
+
+const BKT_COLOR = {
+  STT:      {t:"#185FA5", bg:"#E6F1FB", b:"#85B7EB"},
+  TTS:      {t:"#0F6E56", bg:"#E1F5EE", b:"#5DCAA5"},
+  LLM:      {t:"#993556", bg:"#FBEAF0", b:"#ED93B1"},
+  POST_CALL:{t:"#854F0B", bg:"#FAEEDA", b:"#EF9F27"},
+  INFRA:    {t:"#3C3489", bg:"#EEEDFE", b:"#7F77DD"}
+};
+
+const ROUTING = {
+  STT: {
+    team: "Voice AI (STT)", chan: "#voice-ai-stt",
+    qs: [
+      "Which Call IDs reproduce this? (share 3 to 5 samples)",
+      "What language or accent is the caller speaking?",
+      "Is the issue consistent or only intermittent?",
+      "Is the raw audio clear when listened to directly, without processing?",
+      "Which STT provider and model version is this tenant using?"
+    ]
+  },
+  TTS: {
+    team: "Voice AI (TTS)", chan: "#voice-ai-tts",
+    qs: [
+      "Which Call IDs reproduce this?",
+      "Is the issue present in the audio stream or only in downstream playback?",
+      "What TTS voice and model is configured for this tenant?",
+      "Does the barge-in trigger immediately or after a specific delay?",
+      "Does the issue occur on every call or only on specific phrases or flows?"
+    ]
+  },
+  LLM: {
+    team: "Voice AI (LLM / Prompt)", chan: "#llm-prompt-eng",
+    qs: [
+      "Share the full call transcript or Call ID where this occurred.",
+      "What was the customer's exact intent that the agent mishandled?",
+      "Has the system prompt or agent config changed recently?",
+      "Is this reproducible with a scripted test call?",
+      "Which tenant and use-case flow is affected?"
+    ]
+  },
+  POST_CALL: {
+    team: "Integrations", chan: "#integrations",
+    qs: [
+      "What is the affected Call ID and approximate time?",
+      "Is the webhook firing at all (check server logs) or not reaching your endpoint?",
+      "Is this affecting all calls or a specific integration or tenant?",
+      "Are there any errors in the CRM system or webhook response logs?",
+      "When did this start, and were there any config or deployment changes around that time?"
+    ]
+  },
+  INFRA: {
+    team: "Platform / Infra", chan: "#infra-oncall",
+    qs: [
+      "What is the exact error code or message from the failing endpoint?",
+      "What time window is affected, and is this still ongoing now?",
+      "Is this impacting one tenant or multiple tenants?",
+      "Are there any active alerts in PagerDuty or Datadog for this period?",
+      "Can you share the raw webhook payload or carrier error code?"
+    ]
+  }
+};
+
+const TEST = [
+  {id:1,  text:"Agent keeps hearing 'yes' as 'no' and sends people to collections escalation incorrectly.",                              customer:"Acme Collections",  impact:"Many callers"},
+  {id:2,  text:"Customers say the voice sounds robotic and garbled, and they can't understand amounts.",                                  customer:"FinanceOne",        impact:"Many callers"},
+  {id:3,  text:"Agent told a customer they're going to be arrested if they don't pay today.",                                             customer:"DebtCo",           impact:"Single caller"},
+  {id:4,  text:"Calls connect, but after the call we don't see notes in Salesforce and no summary is written.",                          customer:"SalesForce Inc",    impact:"Many callers"},
+  {id:5,  text:"We're getting 500 errors on the /webhook/call-ended endpoint; nothing is saving.",                                        customer:"WebhookCorp",      impact:"Outage"},
+  {id:6,  text:"Agent repeats the same question in a loop even after the customer answers.",                                              customer:"LoopTech",         impact:"Many callers"},
+  {id:7,  text:"Audio is fine, but the transcript shows [inaudible] for half the call.",                                                  customer:"TranCorp",         impact:"Many callers"},
+  {id:8,  text:"The agent voice cuts off mid-sentence when the customer interrupts. Barge-in seems broken.",                             customer:"VoicePlus",        impact:"Many callers"},
+  {id:9,  text:"Outbound attempts show 'dialed' but the customer never receives a ring. Carrier connect rate dropped to near zero.",      customer:"DialMax",          impact:"Outage"},
+  {id:10, text:"Agent misunderstands Spanish callers; keeps responding in English even when they ask '¿Habla español?'",                 customer:"Multilingual LLC",  impact:"Many callers"},
+  {id:11, text:"After successful payments, the system sometimes double-logs the payment event (duplicate transaction IDs).",             customer:"PaySafe",          impact:"Single caller"},
+  {id:12, text:"On long calls, the voice response starts taking 8-12 seconds to speak back.",                                            customer:"LongCall Co",      impact:"Single caller"},
+  {id:13, text:"Customer says they already paid; agent still insists they haven't and won't check. Bad account lookup/tool use.",        customer:"ResolveNow",       impact:"Single caller"},
+  {id:14, text:"We can't retrieve recordings for yesterday. Storage shows 'file not found' for many call IDs.",                          customer:"RecordVault",      impact:"Many callers"},
+  {id:15, text:"Agent reads the amount as 'one hundred twenty' when it should be 'one thousand twenty'. Number pronunciation is wrong.", customer:"NumericAI",         impact:"Single caller"}
+];
+
+/* ─── SCORING ENGINE ────────────────────────────────────────────── */
+
+function scoreReport(text, impact) {
+  const lower = text.toLowerCase();
+
+  // Per-bucket keyword scoring
+  const scores = {}, evidenceMap = {};
+  for (const b of BUCKET_RULES) {
+    let s = 0, hits = [];
+    for (const k of b.keywords) {
+      if (lower.includes(k.toLowerCase())) { s++; hits.push(k); }
+    }
+    scores[b.id] = s;
+    evidenceMap[b.id] = hits;
+  }
+
+  // Multilingual edge case: if STT wins and LLM also has signal for language routing,
+  // force LLM as a secondary tag with an explanatory note
+  const isMultilingual = lower.includes("spanish") || lower.includes("habla") ||
+    lower.includes("misunderstands spanish") || lower.includes("responding in english");
+  if (isMultilingual && scores["STT"] >= scores["LLM"]) {
+    // Ensure LLM appears as secondary even if it scored 0
+    scores["LLM"] = Math.max(scores["LLM"], 0.5);
+  }
+
+  const sorted = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+  const primary = sorted[0][0];
+  const topScore = sorted[0][1];
+  const allSecondaries = sorted.filter(([id, s]) => id !== primary && s > 0).map(([id]) => id);
+
+  // Confidence with rationale
+  let confidence, confRationale;
+  const effectiveScore = Math.floor(topScore);
+  if (effectiveScore >= 3) {
+    confidence = "High";
+    confRationale = `${effectiveScore} keyword matches for ${primary}, which is a strong signal well above threshold.`;
+  } else if (effectiveScore === 2) {
+    confidence = "High";
+    confRationale = `${effectiveScore} keyword matches for ${primary}. Sufficient for a reliable classification; recommend confirming with call recording.`;
+  } else if (effectiveScore === 1) {
+    confidence = "Med";
+    confRationale = `Only 1 keyword matched for ${primary}. Classification is plausible but thin. A human reviewer should sanity-check before routing.`;
+  } else {
+    confidence = "Low";
+    confRationale = `No keyword matches found for any bucket. The report language may be too vague or novel. Human judgment required. Do not route without manual review.`;
+  }
+
+  if (isMultilingual && primary === "STT") {
+    confRationale += " Note: multilingual failure detected. STT is primary (transcription is likely wrong or in the wrong language), but LLM is flagged as secondary because the agent's choice to respond in English may also reflect a prompt-level language routing gap. Both teams should review.";
+  } else if (allSecondaries.length > 0) {
+    confRationale += ` Note: secondary signal also detected for ${allSecondaries.join(", ")}. This may be a cross-cutting issue.`;
+  }
+
+  // Compliance risk detection
+  const complianceHits = COMPLIANCE_SIGNALS.filter(k => lower.includes(k));
+  const hasComplianceRisk = complianceHits.length > 0;
+
+  // Severity scoring
+  let sevScore = [0, 0, 0, 0], sevEvidence = [];
+  for (let i = 0; i < SEV_RULES.length; i++) {
+    const r = SEV_RULES[i];
+    for (const k of r.keywords) {
+      if (lower.includes(k.toLowerCase())) { sevScore[i] += 2; sevEvidence.push(k); }
+    }
+    if (r.impactBoost && r.impactBoost[impact]) sevScore[i] += r.impactBoost[impact];
+  }
+
+  // Compliance escalation: boost Sev1 by 1 if compliance risk is present but not already Sev0.
+  // We do NOT auto-promote all compliance issues to Sev0 because some (e.g. a single isolated
+  // threatening statement) are serious but not systemic outages. Sev0 is reserved for systemic
+  // or widespread compliance failures. A single incident with compliance risk lands at Sev1
+  // and the rationale explains why.
+  if (hasComplianceRisk) {
+    sevScore[1] += 3; // strong push toward Sev1
+  }
+
+  let si = sevScore.indexOf(Math.max(...sevScore));
+  if (Math.max(...sevScore) === 0) si = 2;
+
+  // Duplicate-transaction special case: limited/intermittent scope = Sev2.
+  // Escalate to Sev1 only when there is evidence of broader impact or financial harm.
+  const isDuplicateTransaction = lower.includes("duplicate transaction") || lower.includes("double-log") || lower.includes("double logs") || lower.includes("payment event");
+  if (isDuplicateTransaction) {
+    const broadImpactSignals = ["many callers","multiple customers","widespread","all payments","financial reconciliation","customers charged twice","duplicate charges","systemic"];
+    const limitedScopeSignals = ["sometimes","occasionally","intermittent","single caller","one customer","isolated","limited scope","subset","observed in some","a few cases"];
+    const hasBroadImpact = broadImpactSignals.some(s => lower.includes(s));
+    const hasLimitedScope = limitedScopeSignals.some(s => lower.includes(s)) || impact === "Single caller";
+    if (!hasBroadImpact && hasLimitedScope) {
+      si = 2; // Sev2: intermittent or limited-scope payment logging issue
+    }
+  }
+
+  const severity = SEV_RULES[si];
+
+  let sevRationale;
+  if (hasComplianceRisk) {
+    // Rationale derives from the actual resolved severity (si), not a separate branch,
+    // so the rationale text always agrees with the displayed badge.
+    const sevLabel = SEV_RULES[si].level;
+    if (si === 0) {
+      sevRationale = `Compliance or regulatory risk detected (matched: "${complianceHits.slice(0,2).join('", "')}" ). Impact reported as "${impact}". Classified ${sevLabel}: widespread or systemic compliance failure. Escalate immediately and loop in legal or compliance review.`;
+    } else {
+      sevRationale = `Compliance or regulatory risk detected (matched: "${complianceHits.slice(0,2).join('", "')}" ). Impact reported as "${impact}". Classified ${sevLabel} because the incident appears isolated rather than systemic. Sev0 is reserved for widespread compliance failures. Legal or compliance review is still strongly recommended regardless of severity level.`;
+    }
+  } else if (isDuplicateTransaction && impact === "Single caller") {
+    sevRationale = `Duplicate transaction logging is a data integrity concern but the impact is reported as "${impact}" and the behavior is intermittent ("sometimes"). Classified Sev2 (Moderate) as the scope is limited. Escalate to Sev1 if duplicate events are confirmed across multiple customers or if financial reconciliation is affected.`;
+  } else if (sevEvidence.length) {
+    sevRationale = `Matched severity keywords: "${sevEvidence.slice(0,3).join('", "')}". Impact reported as "${impact}"${severity.impactBoost && severity.impactBoost[impact] ? ` (adjusted by impact level)` : ""}.`;
+  } else {
+    sevRationale = `No strong severity keywords detected. Defaulting to Sev2 (Moderate) as a conservative baseline. Impact reported as "${impact}". Adjust if scope is confirmed broader or narrower.`;
+  }
+
+  return {
+    primary, allSecondaries,
+    confidence, confRationale,
+    evidence: [...new Set(evidenceMap[primary])],
+    allEvidence: evidenceMap,
+    severity, sevRationale,
+    complianceRisk: hasComplianceRisk,
+    complianceHits,
+    routing: ROUTING[primary],
+    bucketWhy: BUCKET_RULES.find(b => b.id === primary).why
+  };
+}
+
+/* ─── CSV EXPORT ────────────────────────────────────────────────── */
+
+function exportCSV(queue) {
+  const esc = v => `"${String(v || "").replace(/"/g, '""')}"`;
+  const ts = new Date().toLocaleString();
+  const meta = [
+    [esc("Prototype"), esc("Bug Triage Console")].join(","),
+    [esc("Author"), esc("Esther Ajari")].join(","),
+    [esc("Purpose"), esc("Founder's Office Case Study Submission")].join(","),
+    [esc("Generated"), esc(ts)].join(","),
+    ["", ""].join(","), // blank separator row
+  ];
+  const cols = [
+    "Triage Timestamp","Customer","Call ID","Impact","Bug Report",
+    "Bucket","Secondary Tag(s)","Severity","Confidence","Confidence Rationale",
+    "Evidence Phrases","Severity Rationale","Primary Routing Team","Secondary Routing Team","Status",
+    "Override Applied","Override Note"
+  ];
+  const rows = queue.map(it => [
+    it.timestamp,
+    it.customer,
+    it.callId || "",
+    it.impact,
+    it.text,
+    it.finalBucket,
+    it.result.allSecondaries.join("; "),
+    it.finalSev,
+    it.result.confidence,
+    it.result.confRationale,
+    it.result.evidence.join("; "),
+    it.result.sevRationale,
+    it.result.routing.team,
+    it.result.allSecondaries.map(sid => ROUTING[sid]?.team || "").filter(Boolean).join("; "),
+    it.status,
+    it.overrideNote ? "Yes" : "No",
+    it.overrideNote || ""
+  ].map(esc).join(","));
+  const csv = [...meta, cols.map(esc).join(","), ...rows].join("\n");
+  const blob = new Blob([csv], {type: "text/csv"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "esther-ajari-bug-triage-console.csv";
+  a.click();
+}
+
+/* ─── COMPONENTS ────────────────────────────────────────────────── */
+
+function Badge({label, c, small}) {
+  return (
+    <span className="inline-tag" style={{fontSize: small ? 10 : 11, color: c.t, background: c.bg, borderColor: c.b}}>
+      {label}
+    </span>
+  );
+}
+
+function SectionLabel({children}) {
+  return <span className="section-label">{children}</span>;
+}
+
+function InfoBox({children, color}) {
+  return (
+    <div style={{background: color || "#f7f7f5", borderRadius: 8, padding: "11px 14px", fontSize: 13, lineHeight: 1.65}}>
+      {children}
+    </div>
+  );
+}
+
+function SeverityCard({sev}) {
+  return (
+    <div style={{border: `1.5px solid ${sev.border}`, borderRadius: 9, padding: "12px 14px", background: sev.bg}}>
+      <span style={{fontWeight: 700, fontSize: 13, color: sev.color, display: "block", marginBottom: 5}}>
+        {sev.level}: {sev.label}
+      </span>
+      <p style={{fontSize: 12, color: "#444", lineHeight: 1.65, margin: 0}}>{sev.desc}</p>
+    </div>
+  );
+}
+
+function ComplianceBanner({hits}) {
+  return (
+    <div style={{background: "#fff5f0", border: "1.5px solid #F09595", borderRadius: 8, padding: "10px 14px", display: "flex", gap: 10, alignItems: "flex-start"}}>
+      <span style={{fontSize: 16, flexShrink: 0}}>⚠</span>
+      <div>
+        <p style={{fontWeight: 700, fontSize: 12, color: "#A32D2D", marginBottom: 3}}>Compliance / Regulatory Risk Flagged</p>
+        <p style={{fontSize: 12, color: "#7a2020", lineHeight: 1.6, margin: 0}}>
+          This report contains language associated with potentially unlawful or non-compliant agent behavior ({hits.slice(0,3).map(h => `"${h}"`).join(", ")}). Review carefully before routing. Loop in your compliance or legal team as appropriate, regardless of final severity level.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ─── MAIN APP ──────────────────────────────────────────────────── */
+
+function App() {
+  const [view, setView]           = useState("submit");
+  const [form, setForm]           = useState({text: "", customer: "", callId: "", when: "", impact: "Single caller", testReportId: null});
+  const [result, setResult]       = useState(null);
+  const [override, setOverride]   = useState({bucket: "STT", severity: "Sev2", note: ""});
+  const [overrideMode, setOM]     = useState(false);
+  const [overrideError, setOE]    = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
+  const [queue, setQueue]         = useState([]);
+  const [submissionSeq, setSeq]   = useState(0);
+  const [filters, setFilters]     = useState({bucket: "All", severity: "All", status: "All"});
+  const [selected, setSelected]   = useState(null);
+
+  const runTriage = () => {
+    if (!form.text.trim()) return;
+    const r = scoreReport(form.text, form.impact);
+    setResult(r);
+    setOverride({bucket: r.primary, severity: r.severity.level, note: ""});
+    setOM(false); setOE(false); setConfirmed(false);
+  };
+
+  const confirmRoute = () => {
+    if (!result) return;
+    if (overrideMode && !override.note.trim()) { setOE(true); return; }
+    const fb = overrideMode ? override.bucket : result.primary;
+    const fs = overrideMode ? override.severity : result.severity.level;
+    const nextSeq = submissionSeq + 1;
+    setSeq(nextSeq);
+    const queueLabel = form.testReportId ? `Test #${form.testReportId}` : `Custom #${nextSeq}`;
+    setQueue(q => [{
+      id: Date.now(), ...form, result,
+      finalBucket: fb, finalSev: fs,
+      overrideNote: overrideMode ? override.note : "",
+      status: "New",
+      timestamp: new Date().toLocaleString(),
+      queueLabel
+    }, ...q]);
+    setConfirmed(true);
+    setForm({text: "", customer: "", callId: "", when: "", impact: "Single caller"});
+    setResult(null);
+  };
+
+  const loadTest = r => {
+    setForm({text: r.text, customer: r.customer, callId: "", when: "", impact: r.impact, testReportId: r.id});
+    setResult(null); setConfirmed(false); setView("submit");
+  };
+
+  const SEV_ORDER = {Sev0: 0, Sev1: 1, Sev2: 2, Sev3: 3};
+
+  const filtered = queue
+    .filter(it => {
+      if (filters.bucket !== "All" && it.finalBucket !== filters.bucket) return false;
+      if (filters.severity !== "All" && it.finalSev !== filters.severity) return false;
+      if (filters.status !== "All" && it.status !== filters.status) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      const sevDiff = (SEV_ORDER[a.finalSev] ?? 4) - (SEV_ORDER[b.finalSev] ?? 4);
+      if (sevDiff !== 0) return sevDiff;
+      return b.id - a.id; // newest first within same severity
+    });
+
+  const nav = (id, label) => (
+    <button key={id} onClick={() => setView(id)} style={{
+      padding: "9px 18px", border: "none",
+      borderBottom: view === id ? "2px solid #185FA5" : "2px solid transparent",
+      background: "none", cursor: "pointer", fontSize: 13,
+      fontWeight: view === id ? 600 : 400,
+      color: view === id ? "#185FA5" : "#777", borderRadius: 0
+    }}>{label}</button>
+  );
+
+  /* ── SUBMIT VIEW ── */
+  const submitView = () => {
+    const r = result;
+    const bc = r ? BKT_COLOR[r.primary] : null;
+    const sc = r ? {t: r.severity.color, bg: r.severity.bg, b: r.severity.border} : null;
+    const confColor = !r ? "#888" : r.confidence === "High" ? "#3B6D11" : r.confidence === "Med" ? "#854F0B" : "#A32D2D";
+
+    return (
+      <div>
+        <p style={{fontSize: 12, color: "#888", marginBottom: 6, fontWeight: 500}}>Quick-select test reports:</p>
+        <div style={{display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 18}}>
+          {TEST.map(t => (
+            <button key={t.id} onClick={() => loadTest(t)} style={{fontSize: 12, padding: "3px 10px", border: "1px solid #ccc", borderRadius: 5, background: "#fff", color: "#555"}}>{t.id}</button>
+          ))}
+        </div>
+
+        <div style={{display: "flex", flexDirection: "column", gap: 12}}>
+          <div>
+            <label style={{fontSize: 12, fontWeight: 600, display: "block", marginBottom: 4}}>Bug report *</label>
+            <textarea rows={4} value={form.text} onChange={e => setForm(f => ({...f, text: e.target.value, testReportId: null}))} placeholder="Paste the customer bug report here..." style={{width: "100%"}} />
+          </div>
+          <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10}}>
+            <div>
+              <label style={{fontSize: 12, fontWeight: 600, display: "block", marginBottom: 3}}>Customer</label>
+              <input value={form.customer} onChange={e => setForm(f => ({...f, customer: e.target.value}))} placeholder="Customer name" />
+            </div>
+            <div>
+              <label style={{fontSize: 12, fontWeight: 600, display: "block", marginBottom: 3}}>Call ID (optional)</label>
+              <input value={form.callId} onChange={e => setForm(f => ({...f, callId: e.target.value}))} placeholder="call_xxx" />
+            </div>
+            <div>
+              <label style={{fontSize: 12, fontWeight: 600, display: "block", marginBottom: 3}}>When did it start?</label>
+              <input value={form.when} onChange={e => setForm(f => ({...f, when: e.target.value}))} placeholder="e.g. Yesterday 3pm" />
+            </div>
+            <div>
+              <label style={{fontSize: 12, fontWeight: 600, display: "block", marginBottom: 3}}>Impact</label>
+              <select value={form.impact} onChange={e => setForm(f => ({...f, impact: e.target.value}))}>
+                <option>Single caller</option><option>Many callers</option><option>Outage</option>
+              </select>
+            </div>
+          </div>
+          <button onClick={runTriage} style={{alignSelf: "flex-start", padding: "9px 22px", background: "#185FA5", color: "#fff", border: "none", borderRadius: 7, fontSize: 13, fontWeight: 600}}>Run Triage</button>
+        </div>
+
+        {r && !confirmed && (
+          <div style={{marginTop: 22, border: "1px solid #ddd", borderRadius: 10, overflow: "hidden", background: "#fff"}}>
+            <div style={{background: "#f5f3ec", padding: "10px 16px", borderBottom: "1px solid #e8e8e5", display: "flex", justifyContent: "space-between", alignItems: "center"}}>
+              <span style={{fontWeight: 700, fontSize: 13}}>Triage Result: Recommendation Only</span>
+              <span style={{fontSize: 11, color: "#888", fontStyle: "italic"}}>Human review required before routing</span>
+            </div>
+
+            <div style={{padding: 16, display: "flex", flexDirection: "column", gap: 16}}>
+
+              {/* Compliance banner (shown first if flagged) */}
+              {r.complianceRisk && <ComplianceBanner hits={r.complianceHits} />}
+
+              {/* Classification badges */}
+              <div>
+                <SectionLabel>Classification</SectionLabel>
+                <div style={{display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center"}}>
+                  <Badge label={BUCKET_RULES.find(b => b.id === r.primary).label} c={bc} />
+                  {r.allSecondaries.map(sid => (
+                    <Badge key={sid} label={"+ " + BUCKET_RULES.find(b => b.id === sid).label} c={{t: "#5F5E5A", bg: "#F1EFE8", b: "#B4B2A9"}} />
+                  ))}
+                  <Badge label={r.severity.level} c={sc} />
+                  <span style={{fontSize: 11, fontWeight: 700, color: confColor}}>Confidence: {r.confidence}</span>
+                </div>
+              </div>
+
+              {/* Why this bucket? */}
+              <div>
+                <SectionLabel>Why this bucket?</SectionLabel>
+                <InfoBox color="#f0f6ff">
+                  <strong style={{display: "block", marginBottom: 4, fontSize: 12}}>{BUCKET_RULES.find(b => b.id === r.primary).label}</strong>
+                  {r.bucketWhy}
+                </InfoBox>
+              </div>
+
+              {/* Evidence */}
+              <div>
+                <SectionLabel>Evidence: phrases that triggered this classification</SectionLabel>
+                <div style={{display: "flex", flexWrap: "wrap", gap: 5}}>
+                  {[...new Set(r.evidence)].length
+                    ? [...new Set(r.evidence)].map((e, i) => <code key={i} style={{fontSize: 11, background: "#FAEEDA", color: "#854F0B", padding: "2px 8px", borderRadius: 4, border: "1px solid #FAC775"}}>"{e}"</code>)
+                    : <span style={{fontSize: 12, color: "#A32D2D", fontStyle: "italic"}}>No keyword matches. Low confidence. Do not route without manual review.</span>
+                  }
+                </div>
+                {r.allSecondaries.length > 0 && (
+                  <div style={{marginTop: 8}}>
+                    <span style={{fontSize: 11, color: "#888"}}>Secondary evidence also matched: </span>
+                    {r.allSecondaries.map(sid => (
+                      <span key={sid} style={{fontSize: 11}}>
+                        <strong>{sid}</strong>: {r.allEvidence[sid].filter(k => k).slice(0, 2).map(k => `"${k}"`).join(", ")}{" "}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Confidence rationale */}
+              <div>
+                <SectionLabel>Confidence rationale</SectionLabel>
+                <InfoBox color={r.confidence === "Low" ? "#fff5f5" : "#f7f7f5"}>
+                  <span style={{color: confColor, fontWeight: 600}}>{r.confidence} confidence:</span> {r.confRationale}
+                </InfoBox>
+              </div>
+
+              {/* Severity card */}
+              <div>
+                <SectionLabel>Severity assessment</SectionLabel>
+                <SeverityCard sev={r.severity} />
+                <p style={{fontSize: 12, color: "#555", marginTop: 8, lineHeight: 1.6}}><strong>Rationale:</strong> {r.sevRationale}</p>
+              </div>
+
+              {/* Routing */}
+              <div>
+                <SectionLabel>Routing suggestion</SectionLabel>
+                <InfoBox>
+                  <p style={{fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: "#999", marginBottom: 4}}>Primary route</p>
+                  <p style={{fontWeight: 600, marginBottom: r.allSecondaries.length ? 10 : 12}}>{r.routing.team} <code style={{fontWeight: 400, fontSize: 11, color: "#534AB7", marginLeft: 4}}>{r.routing.chan}</code></p>
+                  {r.allSecondaries.length > 0 && (
+                    <div style={{marginBottom: 12, paddingTop: 10, borderTop: "1px solid #e8e8e5"}}>
+                      <p style={{fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: "#999", marginBottom: 4}}>Secondary review</p>
+                      {r.allSecondaries.map(sid => {
+                        const sr = ROUTING[sid];
+                        return sr ? (
+                          <p key={sid} style={{fontWeight: 600, marginBottom: 4}}>{sr.team} <code style={{fontWeight: 400, fontSize: 11, color: "#534AB7", marginLeft: 4}}>{sr.chan}</code></p>
+                        ) : null;
+                      })}
+                    </div>
+                  )}
+                  <SectionLabel>Next questions to ask engineering (primary)</SectionLabel>
+                  <ol style={{margin: 0, paddingLeft: 18}}>
+                    {r.routing.qs.map((q, i) => <li key={i} style={{fontSize: 12, marginBottom: 3}}>{q}</li>)}
+                  </ol>
+                  {r.allSecondaries.length > 0 && r.allSecondaries.map(sid => {
+                    const sr = ROUTING[sid];
+                    if (!sr) return null;
+                    return (
+                      <div key={sid} style={{marginTop: 12, paddingTop: 12, borderTop: "1px solid #e8e8e5"}}>
+                        <SectionLabel>Secondary review questions ({sr.team})</SectionLabel>
+                        <ol style={{margin: 0, paddingLeft: 18}}>
+                          {sr.qs.slice(0, 3).map((q, i) => <li key={i} style={{fontSize: 12, marginBottom: 3}}>{q}</li>)}
+                        </ol>
+                      </div>
+                    );
+                  })}
+                </InfoBox>
+              </div>
+
+              {/* Human override */}
+              <div style={{border: "1px dashed #ccc", borderRadius: 8, padding: "12px 14px"}}>
+                <div style={{display: "flex", alignItems: "center", gap: 8, marginBottom: overrideMode ? 12 : 0}}>
+                  <input type="checkbox" id="ov" checked={overrideMode} onChange={e => {setOM(e.target.checked); setOE(false);}} />
+                  <label htmlFor="ov" style={{fontSize: 13, fontWeight: 500, cursor: "pointer"}}>Human override: change bucket or severity</label>
+                </div>
+                {overrideMode && (
+                  <div style={{display: "flex", flexDirection: "column", gap: 8}}>
+                    <div style={{display: "flex", gap: 8}}>
+                      <select value={override.bucket} onChange={e => setOverride(o => ({...o, bucket: e.target.value}))} style={{flex: 1}}>
+                        {BUCKET_RULES.map(b => <option key={b.id} value={b.id}>{b.label}</option>)}
+                      </select>
+                      <select value={override.severity} onChange={e => setOverride(o => ({...o, severity: e.target.value}))} style={{flex: 1}}>
+                        {SEV_RULES.map(s => <option key={s.level} value={s.level}>{s.level}: {s.label}</option>)}
+                      </select>
+                    </div>
+                    <input
+                      value={override.note}
+                      onChange={e => {setOverride(o => ({...o, note: e.target.value})); setOE(false);}}
+                      placeholder="Justification required. Why are you changing this? (e.g. 'Call recording confirms TTS, not STT')"
+                      style={{borderColor: overrideError ? "#A32D2D" : "#ccc"}}
+                    />
+                    {overrideError && <p style={{fontSize: 12, color: "#A32D2D", margin: 0}}>A justification note is required before you can confirm this override.</p>}
+                  </div>
+                )}
+              </div>
+
+              <button onClick={confirmRoute} style={{alignSelf: "flex-start", padding: "9px 22px", background: "#0F6E56", color: "#fff", border: "none", borderRadius: 7, fontSize: 13, fontWeight: 600}}>
+                Confirm and Route
+              </button>
+            </div>
+          </div>
+        )}
+
+        {confirmed && (
+          <div style={{marginTop: 18, padding: "12px 16px", background: "#EAF3DE", borderRadius: 7, border: "1px solid #C0DD97", color: "#27500A", fontWeight: 500, fontSize: 13}}>
+            Report confirmed and added to triage queue.{" "}
+            <button onClick={() => {setView("queue"); setConfirmed(false);}} style={{background: "none", border: "none", color: "#185FA5", cursor: "pointer", fontWeight: 600, padding: 0}}>View queue</button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  /* ── QUEUE VIEW ── */
+  const queueView = () => (
+    <div>
+      <div style={{display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap", alignItems: "center"}}>
+        {[["bucket", ["All", ...BUCKET_RULES.map(b => b.id)]], ["severity", ["All","Sev0","Sev1","Sev2","Sev3"]], ["status", ["All","New","In Review","Routed","Resolved"]]].map(([k, opts]) => (
+          <div key={k} style={{display: "flex", alignItems: "center", gap: 5}}>
+            <label style={{fontSize: 12, fontWeight: 500, color: "#888"}}>{k.charAt(0).toUpperCase() + k.slice(1)}:</label>
+            <select value={filters[k]} onChange={e => setFilters(f => ({...f, [k]: e.target.value}))} style={{width: "auto", padding: "4px 8px", fontSize: 12}}>
+              {opts.map(o => <option key={o}>{o}</option>)}
+            </select>
+          </div>
+        ))}
+        <div style={{marginLeft: "auto", display: "flex", alignItems: "center", gap: 12}}>
+          <span style={{fontSize: 11, color: "#aaa", fontStyle: "italic"}}>Sorted by severity, then newest first</span>
+          <button
+            onClick={() => exportCSV(queue)}
+            disabled={queue.length === 0}
+            style={{padding: "6px 14px", border: "1px solid #ccc", borderRadius: 6, background: queue.length === 0 ? "#f5f5f3" : "#fff", color: queue.length === 0 ? "#aaa" : "#1a1a1a", fontSize: 12, fontWeight: 500}}
+          >
+            Download CSV ({queue.length})
+          </button>
+        </div>
+      </div>
+
+      {!filtered.length ? (
+        <div style={{textAlign: "center", padding: "48px 0", color: "#888", fontSize: 14}}>No reports yet. Submit a bug report to get started.</div>
+      ) : (
+        <div>
+          <div style={{display: "grid", gridTemplateColumns: "60px 1fr 90px 90px 80px 110px", gap: 6, padding: "6px 10px", fontSize: 10, fontWeight: 700, color: "#888", textTransform: "uppercase", letterSpacing: ".06em", background: "#eeecea", borderRadius: 6, marginBottom: 4}}>
+            <span>Ref</span><span>Report</span><span>Customer</span><span>Bucket</span><span>Severity</span><span>Status</span>
+          </div>
+          {filtered.map(item => {
+            const bc = BKT_COLOR[item.finalBucket] || BKT_COLOR.INFRA;
+            const sevRule = SEV_RULES.find(s => s.level === item.finalSev);
+            const sc = {t: sevRule?.color || "#888", bg: sevRule?.bg || "#eee", b: sevRule?.border || "#ccc"};
+            const isOpen = selected === item.id;
+            return (
+              <div key={item.id} style={{marginBottom: 4}}>
+                <div onClick={() => setSelected(isOpen ? null : item.id)} style={{display: "grid", gridTemplateColumns: "60px 1fr 90px 90px 80px 110px", gap: 6, padding: "9px 10px", border: "1px solid #e8e8e5", borderRadius: isOpen ? "8px 8px 0 0" : "8px", cursor: "pointer", alignItems: "center", background: isOpen ? "#f0f6ff" : "#fff"}}>
+                  <span style={{fontSize: 11, fontWeight: 600, color: "#534AB7", whiteSpace: "nowrap"}}>{item.queueLabel || ""}</span>
+                  <span style={{overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12}}>
+                    {item.result.complianceRisk && <span title="Compliance risk flagged" style={{color: "#A32D2D", marginRight: 4}}>⚠</span>}
+                    {item.text}
+                  </span>
+                  <span style={{fontSize: 11, color: "#888"}}>{item.customer || ""}</span>
+                  <Badge label={item.finalBucket} c={bc} small />
+                  <Badge label={item.finalSev} c={sc} small />
+                  <select onClick={e => e.stopPropagation()} value={item.status} onChange={e => setQueue(q => q.map(it => it.id === item.id ? {...it, status: e.target.value} : it))} style={{fontSize: 11, padding: "3px 5px", width: "auto"}}>
+                    {["New","In Review","Routed","Resolved"].map(s => <option key={s}>{s}</option>)}
+                  </select>
+                </div>
+                {isOpen && (
+                  <div style={{border: "1px solid #ddd", borderTop: "none", borderRadius: "0 0 8px 8px", padding: "14px", background: "#fafaf9", fontSize: 12, lineHeight: 1.75}}>
+                    {item.result.complianceRisk && (
+                      <p style={{marginBottom: 8, padding: "6px 10px", background: "#fff5f0", border: "1px solid #F09595", borderRadius: 6, color: "#A32D2D", fontWeight: 600}}>
+                        Compliance risk flagged: {item.result.complianceHits.slice(0,3).map(h => `"${h}"`).join(", ")}
+                      </p>
+                    )}
+                    <p style={{marginBottom: 6}}><strong>Full report:</strong> {item.text}</p>
+                    <p style={{marginBottom: 6}}><strong>Customer:</strong> {item.customer || ""} &nbsp;|&nbsp; <strong>Call ID:</strong> {item.callId || ""} &nbsp;|&nbsp; <strong>Impact:</strong> {item.impact} &nbsp;|&nbsp; <strong>Logged:</strong> {item.timestamp}</p>
+                    <p style={{marginBottom: 6}}><strong>Evidence matched:</strong> {item.result.evidence.length ? item.result.evidence.map(e => `"${e}"`).join(", ") : "None"}</p>
+                    {item.result.allSecondaries.length > 0 && <p style={{marginBottom: 6}}><strong>Secondary tags:</strong> {item.result.allSecondaries.join(", ")}</p>}
+                    <p style={{marginBottom: 6}}><strong>Confidence:</strong> {item.result.confidence}: {item.result.confRationale}</p>
+                    <p style={{marginBottom: 6}}><strong>Severity rationale:</strong> {item.result.sevRationale}</p>
+                    <p style={{marginBottom: item.overrideNote ? 6 : 0}}><strong>Routed to:</strong> {item.result.routing.team} <code style={{fontSize: 11, color: "#534AB7"}}>{item.result.routing.chan}</code></p>
+                    {item.overrideNote && <p style={{marginTop: 6, padding: "8px 10px", background: "#fff5f0", border: "1px solid #F09595", borderRadius: 6, color: "#A32D2D"}}><strong>Override justification:</strong> {item.overrideNote}</p>}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+
+  /* ── WRITEUP VIEW ── */
+  const writeupView = () => (
+    <div style={{maxWidth: 740}}>
+      <div style={{marginBottom: 20, paddingBottom: 14, borderBottom: "1px solid #e8e8e5"}}>
+        <p style={{fontSize: 12, color: "#555", fontWeight: 600}}>Prepared by Esther Ajari</p>
+        <p style={{fontSize: 11, color: "#999"}}>Founder's Office Case Study Submission</p>
+      </div>
+      <h2 style={{fontSize: 17, fontWeight: 700, marginBottom: 4}}>System Writeup</h2>
+      <p style={{fontSize: 12, color: "#888", marginBottom: 22}}>One-page summary of bucket definitions, severity rubric, routing philosophy, and 15-report triage outputs.</p>
+
+      <SectionLabel>Bucket Definitions</SectionLabel>
+      <div style={{marginBottom: 18}}>
+        {BUCKET_RULES.map(b => (
+          <div key={b.id} style={{marginBottom: 10, paddingLeft: 10, borderLeft: `3px solid ${BKT_COLOR[b.id].b}`}}>
+            <p style={{fontWeight: 600, fontSize: 13, marginBottom: 2}}>{b.label}</p>
+            <p style={{fontSize: 12, color: "#555"}}>{b.why}</p>
+          </div>
+        ))}
+      </div>
+
+      <SectionLabel>Severity Rubric</SectionLabel>
+      <div style={{marginBottom: 18, display: "flex", flexDirection: "column", gap: 8}}>
+        {SEV_RULES.map(s => <SeverityCard key={s.level} sev={s} />)}
+      </div>
+
+      <SectionLabel>Compliance and Regulatory Risk</SectionLabel>
+      <div style={{marginBottom: 18, paddingLeft: 10, borderLeft: "3px solid #F09595"}}>
+        <p style={{fontSize: 12, color: "#555", lineHeight: 1.7}}>
+          Reports containing language associated with potentially unlawful or non-compliant agent behavior (threatening arrest, policy violations, harassment, prohibited statements) are flagged with a compliance risk banner before any other output. The system escalates severity toward Sev1 when compliance risk is detected with single-caller impact, and toward Sev0 when impact is reported as Many callers or Outage. Sev0 is not applied automatically to all compliance issues: a single isolated incident is serious but not a systemic outage. The rationale always explains the distinction. A note to loop in legal or compliance review is included in all compliance-flagged reports regardless of the final severity level.
+        </p>
+      </div>
+
+      <SectionLabel>Routing Philosophy</SectionLabel>
+      <div style={{marginBottom: 22, fontSize: 13, lineHeight: 1.75, color: "#333"}}>
+        <p style={{marginBottom: 8}}>Reports are classified to a primary bucket by a keyword and heuristic rules engine that scores each of the five buckets independently. A secondary tag is added when another bucket also produces keyword matches, flagging cross-cutting issues for reviewers. Multilingual failures are a specific example: the primary bucket is STT (because the audio transcription is likely wrong), but LLM is always added as a secondary tag because the agent's decision to respond in the wrong language may also reflect a prompt-level routing gap.</p>
+        <p style={{marginBottom: 8}}>Severity is derived from keyword signals combined with the reporter-provided impact level. Outage biases toward Sev0, Many callers toward Sev1, and Single caller biases down from Sev1. Intermittent duplicate transaction logging is a special case: it is held at Sev2 unless there is evidence of broader financial impact, because the issue is data integrity rather than a broken user experience. The system always shows the full scoring rationale so a human reviewer can understand and challenge the decision.</p>
+        <p>Classification is always a recommendation. A CS reviewer must click Confirm and Route before any report enters the queue. Any override requires a mandatory written justification that cannot be left blank. The justification is stored permanently and included in the CSV for audit purposes.</p>
+      </div>
+
+      <SectionLabel>15 Test Report Outputs</SectionLabel>
+      <div style={{overflowX: "auto"}}>
+        <table style={{width: "100%", borderCollapse: "collapse", fontSize: 12}}>
+          <thead>
+            <tr style={{background: "#eeecea"}}>
+              {["#","Report","Bucket","Secondary","Severity","Conf"].map(h => (
+                <th key={h} style={{padding: "6px 8px", textAlign: "left", borderBottom: "1px solid #ddd", fontWeight: 600, color: "#555"}}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {TEST.map(t => {
+              const res = scoreReport(t.text, t.impact);
+              const bc = BKT_COLOR[res.primary];
+              const sc = {t: res.severity.color, bg: res.severity.bg, b: res.severity.border};
+              const confColor = res.confidence === "High" ? "#3B6D11" : res.confidence === "Med" ? "#854F0B" : "#A32D2D";
+              return (
+                <tr key={t.id} style={{borderBottom: "1px solid #eee"}}>
+                  <td style={{padding: "6px 8px", color: "#888"}}>{t.id}{res.complianceRisk ? " ⚠" : ""}</td>
+                  <td style={{padding: "6px 8px", maxWidth: 260}}>{t.text.slice(0, 65)}...</td>
+                  <td style={{padding: "6px 8px"}}><Badge label={res.primary} c={bc} small /></td>
+                  <td style={{padding: "6px 8px", fontSize: 11, color: "#888"}}>{res.allSecondaries.join(", ") || ""}</td>
+                  <td style={{padding: "6px 8px"}}><Badge label={res.severity.level} c={sc} small /></td>
+                  <td style={{padding: "6px 8px", fontWeight: 700, fontSize: 11, color: confColor}}>{res.confidence}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+
+  /* ── AI LOG VIEW ── */
+  const logView = () => {
+    const sections = [
+      {
+        heading: "Generated by Claude Code",
+        color: "#185FA5", bg: "#E6F1FB", icon: "✦",
+        entries: [
+          "Initial prototype scaffold: form inputs, state management, tab routing, and component layout, generated in one pass from a structured prompt based on the Salient case study brief.",
+          "Rules engine: per-bucket keyword scoring, severity signal detection, confidence level assignment, and secondary tag logic.",
+          "Queue system: filterable triage table, expandable row detail, and status management.",
+          "Routing framework: team assignments, Slack channel references, and the five clarifying questions per bucket.",
+          "First-draft writeup text: bucket definitions, severity descriptions, and routing philosophy prose.",
+          "Confidence rationale templates: the High, Med, and Low explanatory text patterns, tuned against the 15 test cases.",
+          "All five bucket-level 'Why this bucket?' explanations.",
+          "Severity card descriptions for all four severity levels.",
+          "This AI usage log, drafted and then revised to reflect the actual development process."
+        ]
+      },
+      {
+        heading: "Human review and refinements",
+        color: "#3B6D11", bg: "#EAF3DE", icon: "✎",
+        entries: [
+          "Added secondary tags: the engine originally returned only one secondary bucket. Updated to capture all buckets with keyword matches and display them as stacked badges.",
+          "Added confidence rationale explanations visible to reviewers, replacing a bare High/Med/Low label.",
+          "Added severity explanation cards so reviewers understand what each level means operationally, not just symbolically.",
+          "Added CSV export with full audit fields: timestamp, customer, bucket, secondary tags, severity, confidence, confidence rationale, routing team, status, override applied, and override note.",
+          "Added mandatory override justification with blocking validation. The initial draft had an unconstrained override with no audit trail.",
+          "Added compliance and regulatory risk detection as a separate escalation signal, including a visible banner, severity boost logic, and a note to loop in legal or compliance review.",
+          "Reviewed all 15 test cases individually and challenged the system's outputs.",
+          "Corrected multilingual routing: report 10 (Spanish callers) now correctly keeps STT as primary and adds LLM as a secondary tag with an explanatory confidence rationale.",
+          "Corrected duplicate transaction severity: report 11 (intermittent double-log, single caller) is now held at Sev2 rather than Sev1, with explicit rationale explaining the distinction.",
+          "Corrected compliance severity: report 3 (agent threatening arrest) is classified Sev1 with a compliance risk flag, not Sev0, because the impact is a single call rather than a systemic failure. The rationale explains this distinction.",
+          "Removed all em dashes from the application and replaced them with natural punctuation throughout.",
+          "Updated all references from 'Claude used as vibe-coding tool' to 'Claude Code used as vibe-coding tool'.",
+          "Added secondary routing display: when a secondary tag exists, the routing section now shows both a primary route and a secondary review team beneath it.",
+          "Deduplicated evidence phrases before display so the same keyword match is never shown twice.",
+          "Strengthened duplicate transaction severity logic to recognise a broad set of limited-scope signals, not just the word 'sometimes', and to escalate only when there is evidence of broader financial impact.",
+          "Added queue prioritisation by severity then newest first, so the highest-priority items appear at the top of the triage queue without changing the queue layout.",
+          "Added secondary review questions to the routing section. When a secondary bucket exists, the top 3 clarifying questions from the secondary team appear beneath the primary questions with a clear label, so engineers from both teams have actionable next steps.",
+          "Tightened the multilingual confidence rationale. The previous wording was accurate but verbose. Rewritten to be shorter and easier to read without losing the substance.",
+          "Added queue row reference numbers. Test report submissions show their original report number (e.g. Test #10) so reviewers can cross-reference the queue against the 15-report output table. Manual submissions show a submission sequence number (e.g. Custom #1)."
+        ]
+      },
+      {
+        heading: "Ideas considered and rejected",
+        color: "#A32D2D", bg: "#FCEBEB", icon: "✗",
+        entries: [
+          "Weighted TF-IDF scoring across keywords. Rejected in favor of a simpler per-bucket additive score that is more transparent and interpretable by non-technical CS reviewers.",
+          "Auto-routing without human confirmation. Rejected. Directly conflicts with the non-negotiable requirement that classification be a recommendation requiring explicit human sign-off.",
+          "Fully AI-only classification with no rules layer. Rejected. The brief explicitly requires a rules backstop so the system does not rely on a model 'just knowing.'",
+          "Automatic Sev0 for all compliance-flagged reports. Rejected. A single isolated non-compliant statement is serious but not a systemic outage. The severity rubric needs to distinguish between the two, and the rationale needs to explain it.",
+          "Unnecessary UI redesign passes that added visual complexity without improving operational value.",
+          "Additional infrastructure such as a backend, persistent database, or user authentication. Rejected as out of scope for a CS triage prototype that needs to run as a single downloadable file.",
+          "Further UI redesign after the second QA pass. The internal-tool layout was already clear and functional. Additional visual changes would have added complexity without improving the reviewer experience.",
+          "Production infrastructure such as database persistence, live AI APIs, or user authentication. These would increase deployment complexity and maintenance burden without improving the core case-study objective, which is operational judgment and auditability."
+        ]
+      }
+    ];
+
+    return (
+      <div style={{maxWidth: 700}}>
+        <div style={{marginBottom: 20, paddingBottom: 14, borderBottom: "1px solid #e8e8e5", display: "flex", gap: 32}}>
+          <div>
+            <p style={{fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: "#999", marginBottom: 2}}>Project Author</p>
+            <p style={{fontSize: 13, fontWeight: 600, color: "#333"}}>Esther Ajari</p>
+          </div>
+          <div>
+            <p style={{fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: "#999", marginBottom: 2}}>Vibe-Coding Tool</p>
+            <p style={{fontSize: 13, fontWeight: 600, color: "#333"}}>Claude Code</p>
+          </div>
+        </div>
+        <h2 style={{fontSize: 17, fontWeight: 700, marginBottom: 4}}>AI Usage Log</h2>
+        <p style={{fontSize: 12, color: "#888", marginBottom: 22}}>Claude Code used as vibe-coding tool. This log covers what was generated, what was reviewed and refined, and what was considered and rejected.</p>
+        {sections.map(sec => (
+          <div key={sec.heading} style={{marginBottom: 24}}>
+            <div style={{display: "flex", alignItems: "center", gap: 8, marginBottom: 12}}>
+              <div style={{width: 26, height: 26, borderRadius: 6, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, background: sec.bg, color: sec.color}}>{sec.icon}</div>
+              <p style={{fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: sec.color, margin: 0}}>{sec.heading}</p>
+            </div>
+            <div style={{display: "flex", flexDirection: "column", gap: 0}}>
+              {sec.entries.map((text, i) => (
+                <div key={i} style={{display: "flex", gap: 10, paddingBottom: 10, marginBottom: 10, borderBottom: "1px solid #eee"}}>
+                  <span style={{flexShrink: 0, fontSize: 11, color: sec.color, fontWeight: 700, marginTop: 1}}>{i + 1}.</span>
+                  <p style={{margin: 0, fontSize: 13, lineHeight: 1.65, color: "#333"}}>{text}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  /* ── RENDER ── */
+  return (
+    <div style={{minHeight: "100vh", background: "#f4f3f0"}}>
+      <div style={{maxWidth: 900, margin: "0 auto", padding: "24px 20px 80px"}}>
+        <div style={{display: "flex", alignItems: "center", gap: 10, marginBottom: 20}}>
+          <div style={{width: 32, height: 32, borderRadius: 8, background: "#185FA5", display: "flex", alignItems: "center", justifyContent: "center"}}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round">
+              <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 013.95 10.93 19.79 19.79 0 01.88 2.18 2 2 0 012.86 0h3a2 2 0 012 1.72 12.84 12.84 0 00.7 2.81 2 2 0 01-.45 2.11L7.09 7.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45 12.84 12.84 0 002.81.7A2 2 0 0122 14.92v2z"/>
+            </svg>
+          </div>
+          <div>
+            <div style={{fontWeight: 700, fontSize: 18}}>Bug Triage Console</div>
+            <div style={{fontSize: 11, color: "#888"}}>Founder's Office Case Study Submission by Esther Ajari</div>
+          </div>
+        </div>
+
+        <div style={{borderBottom: "1px solid #ddd", marginBottom: 24, display: "flex"}}>
+          {nav("submit", "Submit Report")}
+          {nav("queue", `Triage Queue (${queue.length})`)}
+          {nav("writeup", "System Writeup")}
+          {nav("log", "AI Usage Log")}
+        </div>
+
+        {view === "submit"  && submitView()}
+        {view === "queue"   && queueView()}
+        {view === "writeup" && writeupView()}
+        {view === "log"     && logView()}
+
+        {/* Footer */}
+        <div style={{marginTop: 48, paddingTop: 16, borderTop: "1px solid #e0deda", textAlign: "center", fontSize: 11, color: "#aaa"}}>
+          Prepared by Esther Ajari &nbsp;|&nbsp; Built using Claude Code &nbsp;|&nbsp; Founder's Office Case Study Submission
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
