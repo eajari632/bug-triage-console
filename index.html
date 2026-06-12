@@ -16,6 +16,34 @@ textarea{resize:vertical}
 button{font-family:inherit;cursor:pointer}
 code{font-family:monospace}
 .section-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#999;margin-bottom:6px;display:block}
+.writeup-heading{font-size:17px;font-weight:700;color:#1a1a1a;margin:0 0 10px 0;padding:0}
+@media print{
+@page{size:A3 portrait;margin:8mm 10mm}
+html,body{height:auto!important;overflow:visible!important}
+[data-view="writeup"] *{visibility:hidden}
+[data-view="writeup"] #writeup-print-area,[data-view="writeup"] #writeup-print-area *{visibility:visible}
+#writeup-print-area{position:fixed;top:0;left:0;width:100%;padding:0;margin:0;max-width:100%!important;box-sizing:border-box}
+#writeup-print-area *{font-size:13px!important;line-height:1.55!important}
+#writeup-print-area .writeup-title{font-size:48px!important;font-weight:700!important;line-height:1!important;letter-spacing:-.03em!important}
+#writeup-print-area .writeup-heading,#writeup-print-area h3{font-size:16px!important;font-weight:700!important;margin:0 0 7px 0!important;line-height:1.2!important}
+#writeup-print-area>div>div{margin-bottom:14px!important}
+#writeup-print-area p{margin-bottom:6px!important}
+#writeup-print-area .bucket-grid{display:grid!important;grid-template-columns:1fr 1fr!important;gap:10px!important}
+#writeup-print-area .sev-grid{display:grid!important;grid-template-columns:1fr 1fr!important;gap:10px!important}
+#writeup-print-area .bucket-grid>div,#writeup-print-area .sev-grid>div{margin-bottom:0!important}
+[data-view="log"] *{visibility:hidden}
+[data-view="log"] #log-print-area,[data-view="log"] #log-print-area *{visibility:visible}
+#log-print-area{position:fixed;top:0;left:0;width:100%;padding:0 30mm;margin:0;max-width:100%!important;box-sizing:border-box}
+#log-print-area *{font-size:16px!important;line-height:1.75!important}
+#log-print-area .log-section-heading{font-size:24px!important;font-weight:700!important;line-height:1.2!important;margin:0 0 14px 0!important}
+#log-print-area li{font-size:16px!important;margin-bottom:14px!important;line-height:1.75!important}
+#log-print-area>div>div{margin-bottom:32px!important}
+#log-print-area ol{margin:0!important;padding-left:22px!important}
+
+#queue-print-area *{font-size:14px!important;line-height:1.4!important}
+#queue-print-area .queue-row{padding:10px 10px!important}
+#queue-print-area .queue-header{padding:8px 10px!important}
+}
 .card{background:#fff;border:1px solid #e5e5e3;border-radius:10px;padding:16px}
 .inline-tag{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:5px;border:1px solid}
 </style>
@@ -169,49 +197,48 @@ const BKT_COLOR = {
 
 const ROUTING = {
   STT: {
-    team: "Voice AI (STT)", chan: "#voice-ai-stt",
+    team: "Voice AI (STT)",
     qs: [
-      "Language or accent of the affected caller.",
-      "Whether the issue is consistent or intermittent.",
-      "Raw audio quality when listened to directly, without processing.",
-      "STT provider and model version configured for this customer account."
+      "Language or accent of the affected caller",
+      "Whether the issue is consistent or occurs only sometimes",
+      "Whether the misrecognition occurs on the same word or phrase repeatedly or varies across calls",
+      "Whether other callers with a similar accent have reported the same issue"
     ]
   },
   TTS: {
-    team: "Voice AI (TTS)", chan: "#voice-ai-tts",
+    team: "Voice AI (TTS)",
     qs: [
-      "Whether the issue appears in the audio stream or only in downstream playback.",
-      "TTS voice and model configured for this customer account.",
-      "Whether the issue occurs on every call or only on specific phrases or flows.",
-      "Any recent changes to TTS voice, model, or configuration."
+      "Whether the issue occurs on every call or only on specific phrases",
+      "Whether the issue affects all configured voices or only a specific voice",
+      "Customer's description of what they heard versus what they expected",
+      "Approximate time window when the issue was first noticed"
     ]
   },
   LLM: {
-    team: "Voice AI (LLM / Prompt)", chan: "#llm-prompt-eng",
+    team: "Voice AI (LLM / Prompt)",
     qs: [
-      "Customer intent that the agent mishandled.",
-      "Recent changes to the system prompt or agent configuration.",
-      "Whether the issue is reproducible with a scripted test call.",
-      "Affected customer account and use-case flow."
+      "Any account-specific circumstances not already visible in the transcript",
+      "Exact timestamp of the agent's incorrect response within the call, if known",
+      "Whether the customer attempted to correct the agent and how the agent responded",
+      "Approximate time window when this type of issue was first reported"
     ]
   },
   POST_CALL: {
-    team: "Integrations", chan: "#integrations",
+    team: "Integrations",
     qs: [
-      "Whether the webhook is firing at all (check server logs) or not reaching the endpoint.",
-      "Whether this affects all calls or a specific customer or integration.",
-      "Any errors visible in the CRM system or webhook response logs.",
-      "Approximate start time and any config or deployment changes around that time."
+      "Whether this affects all calls or only calls for a specific customer or workflow",
+      "Whether the missing data (notes, summaries, CRM updates) was ever present or never appeared",
+      "Approximate time window when the issue started",
+      "Any visible error message shown to the reviewer or in the CRM interface"
     ]
   },
   INFRA: {
-    team: "Platform / Infra", chan: "#infra-oncall",
+    team: "Platform / Infra",
     qs: [
-      "Exact error code or message from the failing endpoint.",
-      "Affected time window and whether the issue is still ongoing.",
-      "Whether one customer account or multiple customers are impacted.",
-      "Active alerts in PagerDuty or Datadog for this time period.",
-      "Raw webhook payload or carrier error code if available."
+      "Affected time window and whether the issue is still ongoing",
+      "Approximate number of affected events, requests, or records",
+      "Any error message visible to the reviewer or reported by the customer",
+      "Whether the issue appeared suddenly or gradually worsened"
     ]
   }
 };
@@ -338,10 +365,16 @@ function scoreReport(text, impact) {
     }
   } else if (effectiveScore >= 3) {
     confidence = "High";
-    confBucketRationale = `Strong and specific evidence points to ${primary} as the owner. No competing bucket explanations of similar strength.`;
+    const topEvidence = (evidenceMap[primary] || []).slice(0,2).map(k => `"${k}"`).join(", ");
+    confBucketRationale = topEvidence
+      ? `The evidence (${topEvidence}) points clearly to ${primary} as the owner. No competing bucket explanations were found.`
+      : `Multiple signals point to ${primary}. No competing bucket explanations of similar strength.`;
   } else if (effectiveScore === 2) {
     confidence = "High";
-    confBucketRationale = `Sufficient evidence to classify with confidence. Recommend confirming with call recording.`;
+    const topEvidence2 = (evidenceMap[primary] || []).slice(0,2).map(k => `"${k}"`).join(", ");
+    confBucketRationale = topEvidence2
+      ? `The report contains clear ${primary} signals (${topEvidence2}). Sufficient to classify with confidence; confirm with a call recording before routing.`
+      : `Sufficient evidence to classify ${primary} with confidence. Confirm with a call recording before routing.`;
   } else if (effectiveScore === 1) {
     confidence = "Med";
     confBucketRationale = `Only 1 keyword matched for ${primary}. Classification is plausible but thin. A human reviewer should sanity-check before confirming.`;
@@ -598,31 +631,38 @@ function scoreReport(text, impact) {
 
   // Context-aware questions: override static list when evidence points to a specific sub-issue
   const primaryRouting = {...ROUTING[primary]};
-  if (primary === "TTS") {
+  if (primary === "STT" && isMultilingual) {
+    primaryRouting.qs = [
+      "Accent or dialect of the affected caller (e.g. Mexican Spanish, Colombian Spanish, bilingual speaker)",
+      "Whether the issue occurs throughout the call or only after specific prompts",
+      "Whether the caller and agent begin in the same language before the language switch occurs",
+      "Whether other callers with a similar language background have reported the same issue"
+    ];
+  } else if (primary === "TTS") {
     const ev = evidenceMap["TTS"].map(k => k.toLowerCase());
     const hasBargeIn = ev.some(k => ["barge-in","barge in","cuts off","mid-sentence","interrupts"].includes(k));
     const hasVoiceQuality = ev.some(k => ["robotic","garbled","voice sounds","voice quality","pronunciation","number pronunciation","reads the amount"].includes(k));
     const hasLatency = ev.some(k => ["8-12 seconds","speak back","voice response starts taking"].includes(k));
     if (hasBargeIn && !hasVoiceQuality) {
       primaryRouting.qs = [
-        "Whether the agent stops speaking immediately when interrupted or continues talking.",
-        "Whether interruption behavior varies by call type or voice model.",
-        "Whether the barge-in threshold is configurable and whether it changed recently.",
-        "Whether the issue occurs on every call or only in specific flows."
+        "Whether the agent stops speaking immediately when interrupted or continues talking over the caller",
+        "Whether the issue occurs on every call or only in specific situations",
+        "Whether callers with a particular speaking style or pace are more affected",
+        "Approximate time window when the interruption issue was first noticed"
       ];
     } else if (hasVoiceQuality) {
       primaryRouting.qs = [
-        "Whether the distortion is present on every call or only a subset.",
-        "Whether the issue affects all TTS voices or only a specific voice or model.",
-        "Whether numbers and amounts are affected more than normal speech.",
-        "Any recent changes to TTS voice, model, or configuration."
+        "Whether the distortion is present on every call or only a subset",
+        "Whether the issue affects all configured voices or only a specific voice",
+        "Customer's description of what the voice sounded like",
+        "Approximate time window when the issue was first noticed"
       ];
     } else if (hasLatency) {
       primaryRouting.qs = [
-        "Whether the delay occurs at the start of the response or mid-sentence.",
-        "Whether the latency is consistent or variable across calls.",
-        "Whether it correlates with call length, time of day, or specific flows.",
-        "Any recent changes to TTS provider settings or infrastructure."
+        "Whether the delay occurs at the start of the agent's response or mid-conversation",
+        "Whether the delay is consistent or varies between calls",
+        "Approximate time window when callers first started reporting the delay",
+        "Whether the delay affects all calls or only calls of a particular type"
       ];
     }
   }
@@ -649,7 +689,10 @@ function scoreReport(text, impact) {
       confSevRationale = `The report contains both escalating and limiting signals. The final severity reflects the balance between broad scope indicators and factors that reduce urgency. Verify actual scope before escalating.`;
     } else if (impactIsBroad) {
       sevConfLevel = "High";
-      confSevRationale = `Severity is supported by both report evidence and the selected impact level. The recommendation is well-supported.`;
+      const escList = sevEvidence.filter(k => !k.includes("(impact level)")).slice(0,2).map(k => `"${k}"`).join(", ");
+      confSevRationale = escList
+        ? `The report contains specific severity signals (${escList}), and the selected impact level confirms broad scope. Both factors support the assigned severity.`
+        : `The selected impact level confirms broad scope and supports the assigned severity.`;
     } else {
       sevConfLevel = "Med";
       confSevRationale = `Severity evidence is present but the selected impact level limits scope. Verify whether the issue is wider than reported before escalating.`;
@@ -677,10 +720,10 @@ function scoreReport(text, impact) {
   if (overallLevel !== confidence) confidence = overallLevel;
 
   confOverall = overallLevel === "High"
-    ? `High confidence. Both the bucket classification and severity are well supported by the report.`
+    ? `High confidence. Bucket ownership is clear and severity is directly supported by evidence in the report. The recommendation can be acted on.`
     : overallLevel === "Med"
-    ? `Medium confidence. The triage recommendation is reasonable but one or more factors require human verification before routing.`
-    : `Low confidence. The report contains insufficient signal for reliable classification. Manual review required.`;
+    ? `Medium confidence. The core recommendation is reasonable, but at least one dimension , bucket ownership or severity scope , requires verification before routing.`
+    : `Low confidence. The report contains insufficient signal to classify reliably. Manual review is required before routing.`;
 
   const confRationale = {
     bucket: confBucketRationale,
@@ -698,6 +741,40 @@ function scoreReport(text, impact) {
         llmFailureLabels.push(cat.label);
       }
     }
+  }
+
+  // Context-aware INFRA: surface the most relevant first evidence item based on failure type
+  if (primary === "INFRA") {
+    const isOutbound = lower.includes("outbound") || lower.includes("dialed") || lower.includes("never receives a ring") ||
+      lower.includes("carrier connect") || lower.includes("customer never receives") || lower.includes("not connected") ||
+      lower.includes("no ring") || lower.includes("dial failed");
+    const isWebhookOrEndpoint = lower.includes("webhook") || lower.includes("endpoint") || lower.includes("500 error") ||
+      lower.includes("503") || lower.includes("api failure") || lower.includes("nothing is saving");
+    const isRecording = lower.includes("recording") || lower.includes("file not found") || lower.includes("storage");
+
+    if (isOutbound) {
+      primaryRouting.qs = [
+        "Three to five outbound attempt IDs or call records that reproduce the issue",
+        "Approximate timestamps of the affected attempts",
+        "Destination phone numbers (if policy allows)",
+        "Carrier or dial-status information shown in your system, if available"
+      ];
+    } else if (isWebhookOrEndpoint) {
+      primaryRouting.qs = [
+        "The specific endpoint or request that is failing",
+        "Affected time window and whether the issue is still ongoing",
+        "Any error message visible to the reviewer or reported by the customer",
+        "Whether the issue appeared suddenly or gradually worsened"
+      ];
+    } else if (isRecording) {
+      primaryRouting.qs = [
+        "The specific Call IDs or date range for which recordings are unavailable",
+        "Affected time window and whether the issue is still ongoing",
+        "Whether the issue affects one customer or multiple customers",
+        "Any error message shown when attempting to retrieve the recording"
+      ];
+    }
+    // If none of the above match, the static INFRA qs are used as fallback
   }
 
   return {
@@ -831,7 +908,7 @@ function App() {
   const [confirmed, setConfirmed] = useState(false);
   const [queue, setQueue]         = useState([]);
   const [submissionSeq, setSeq]   = useState(0);
-  const [filters, setFilters]     = useState({primary: "All", secondary: "All", severity: "All", status: "All"});
+  const [filters, setFilters]     = useState({primary: "All", secondary: "All", severity: "All", status: "All", specialStatus: "All"});
   const [selected, setSelected]   = useState(new Set());
 
   const runTriage = () => {
@@ -928,6 +1005,9 @@ function App() {
       if (filters.secondary !== "All" && !it.result.allSecondaries.includes(filters.secondary)) return false;
       if (filters.severity !== "All" && it.finalSev !== filters.severity) return false;
       if (filters.status !== "All" && it.status !== filters.status) return false;
+      if (filters.specialStatus === "Regular cases" && (it.overrideChangeSummary || it.result.complianceRisk)) return false;
+      if (filters.specialStatus === "Overridden cases" && !it.overrideChangeSummary) return false;
+      if (filters.specialStatus === "Compliance cases" && !it.result.complianceRisk) return false;
       return true;
     })
     .sort((a, b) => {
@@ -1134,8 +1214,34 @@ function App() {
                   )}
                   <SectionLabel>Key information to share with primary team</SectionLabel>
                   <ol style={{margin: 0, paddingLeft: 18}}>
-                    <li style={{fontSize: 12, marginBottom: 3}}>{form.impact === "Single caller" ? "Full call transcript or Call ID where the issue occurred." : "3 to 5 Call IDs or transcripts that reproduce the issue."}</li>
-                    {r.routing.qs.map((q, i) => <li key={i} style={{fontSize: 12, marginBottom: 3}}>{q}</li>)}
+                    {r.primary !== "INFRA" && (
+                      <li style={{fontSize: 12, marginBottom: 3}}>
+                        {r.primary === "LLM"
+                          ? (form.impact === "Single caller"
+                              ? "Full call transcript or Call ID, including the customer intent that was mishandled and the agent's response"
+                              : "Three to five Call IDs or transcripts that reproduce the issue, with the customer intent that was mishandled noted for each")
+                          : (form.impact === "Single caller"
+                              ? "Full call transcript or Call ID where the issue occurred"
+                              : "Three to five Call IDs or transcripts that reproduce the issue")
+                        }
+                      </li>
+                    )}
+                    {r.routing.qs
+                      .filter(q => {
+                        const lo = q.toLowerCase();
+                        const scopeQ = lo.includes("one customer account or multiple") || lo.includes("one customer or multiple");
+                        const otherCallersQ = lo.includes("other callers") || lo.includes("similar language background") ||
+                          lo.includes("occurred on other calls") || lo.includes("appears isolated");
+                        // Suppress scope-confirmation questions when impact already establishes scope
+                        if (scopeQ && form.impact === "Single caller") return false;
+                        if (scopeQ && (form.impact === "Many callers" || form.impact === "Outage")) return false;
+                        // Suppress "other callers" questions when impact already confirms multiple callers
+                        if (otherCallersQ && (form.impact === "Many callers" || form.impact === "Outage")) return false;
+                        // Suppress customer account questions for single caller (already identified via call ID)
+                        if (form.impact === "Single caller" && (lo.includes("customer account") || lo.includes("multiple customers"))) return false;
+                        return true;
+                      })
+                      .map((q, i) => <li key={i} style={{fontSize: 12, marginBottom: 3}}>{q}</li>)}
                   </ol>
                   {r.allSecondaries.length > 0 && r.allSecondaries.map(sid => {
                     const sr = ROUTING[sid];
@@ -1144,8 +1250,22 @@ function App() {
                       <div key={sid} style={{marginTop: 12, paddingTop: 12, borderTop: "1px solid #e8e8e5"}}>
                         <SectionLabel>Key information to share with secondary team</SectionLabel>
                         <ol style={{margin: 0, paddingLeft: 18}}>
-                          <li style={{fontSize: 12, marginBottom: 3}}>{form.impact === "Single caller" ? "Full call transcript or Call ID where the issue occurred." : "3 to 5 Call IDs or transcripts that reproduce the issue."}</li>
-                          {sr.qs.slice(0, 3).map((q, i) => <li key={i} style={{fontSize: 12, marginBottom: 3}}>{q}</li>)}
+                          {sid !== "INFRA" && (
+                            <li style={{fontSize: 12, marginBottom: 3}}>{form.impact === "Single caller" ? "Full call transcript or Call ID where the issue occurred" : "Three to five Call IDs or transcripts that reproduce the issue"}</li>
+                          )}
+                          {sr.qs.slice(0, 3)
+                            .filter(q => {
+                              const lo = q.toLowerCase();
+                              const scopeQ = lo.includes("one customer account or multiple") || lo.includes("one customer or multiple");
+                              const otherCallersQ = lo.includes("other callers") || lo.includes("similar language background") ||
+                                lo.includes("occurred on other calls") || lo.includes("appears isolated");
+                              if (scopeQ && form.impact === "Single caller") return false;
+                              if (scopeQ && (form.impact === "Many callers" || form.impact === "Outage")) return false;
+                              if (otherCallersQ && (form.impact === "Many callers" || form.impact === "Outage")) return false;
+                              if (form.impact === "Single caller" && (lo.includes("customer account") || lo.includes("multiple customers"))) return false;
+                              return true;
+                            })
+                            .map((q, i) => <li key={i} style={{fontSize: 12, marginBottom: 3}}>{q}</li>)}
                         </ol>
                       </div>
                     );
@@ -1153,11 +1273,11 @@ function App() {
                 </InfoBox>
               </div>
 
-              {/* Human override */}
+              {/* Human Override */}
               <div style={{border: "1px dashed #ccc", borderRadius: 8, padding: "12px 14px"}}>
                 <div style={{display: "flex", alignItems: "center", gap: 8, marginBottom: overrideMode ? 12 : 0}}>
                   <input type="checkbox" id="ov" checked={overrideMode} onChange={e => {setOM(e.target.checked); setOE(false);}} />
-                  <label htmlFor="ov" style={{fontSize: 13, fontWeight: 500, cursor: "pointer"}}>Human override: change bucket or severity</label>
+                  <label htmlFor="ov" style={{fontSize: 13, fontWeight: 500, cursor: "pointer"}}>Human Override: change bucket or severity</label>
                 </div>
                 {overrideMode && (
                   <div style={{display: "flex", flexDirection: "column", gap: 8}}>
@@ -1199,7 +1319,7 @@ function App() {
 
   /* ── QUEUE VIEW ── */
   const queueView = () => (
-    <div>
+    <div id="queue-print-area">
       <div style={{display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap", alignItems: "center"}}>
         {[["primary", ["All", ...BUCKET_RULES.map(b => b.id)]], ["secondary", ["All", ...BUCKET_RULES.map(b => b.id)]], ["severity", ["All","Sev0","Sev1","Sev2","Sev3"]], ["status", ["All","New","In Review","Routed","Resolved"]]].map(([k, opts]) => (
           <div key={k} style={{display: "flex", alignItems: "center", gap: 5}}>
@@ -1209,8 +1329,22 @@ function App() {
             </select>
           </div>
         ))}
+        <div style={{display: "flex", alignItems: "center", gap: 5}}>
+          <label style={{fontSize: 12, fontWeight: 500, color: "#888"}}>Special Status:</label>
+          <select value={filters.specialStatus} onChange={e => setFilters(f => ({...f, specialStatus: e.target.value}))} style={{width: "auto", padding: "4px 8px", fontSize: 12}}>
+            <option>All</option>
+            <option>Regular cases</option>
+            <option>Overridden cases</option>
+            <option>Compliance cases</option>
+          </select>
+        </div>
         <div style={{marginLeft: "auto", display: "flex", alignItems: "center", gap: 12}}>
           <span style={{fontSize: 11, color: "#aaa", fontStyle: "italic"}}>Sorted by severity, then newest first</span>
+          <button
+            onClick={() => setFilters({primary: "All", secondary: "All", severity: "All", status: "All", specialStatus: "All"})}
+            style={{padding: "6px 14px", border: "1px solid #ccc", borderRadius: 6, background: "#fff", fontSize: 12, cursor: "pointer", color: "#555"}}>
+            Reset Filters
+          </button>
           <button
             onClick={() => exportCSV(queue)}
             disabled={queue.length === 0}
@@ -1225,7 +1359,7 @@ function App() {
         <div style={{textAlign: "center", padding: "48px 0", color: "#888", fontSize: 14}}>No reports yet. Submit a bug report to get started.</div>
       ) : (
         <div>
-          <div style={{display: "grid", gridTemplateColumns: "60px 1fr 90px 70px 70px 80px 110px", gap: 6, padding: "6px 10px", fontSize: 10, fontWeight: 700, color: "#888", textTransform: "uppercase", letterSpacing: ".06em", background: "#eeecea", borderRadius: 6, marginBottom: 4}}>
+          <div className="queue-row queue-header" style={{display: "grid", gridTemplateColumns: "60px 1fr 90px 70px 70px 80px 110px", gap: 6, padding: "6px 10px", fontSize: 10, fontWeight: 700, color: "#888", textTransform: "uppercase", letterSpacing: ".06em", background: "#eeecea", borderRadius: 6, marginBottom: 4}}>
             <span>Ref</span><span>Report</span><span>Customer</span><span>Primary Bucket</span><span>Secondary Bucket</span><span>Severity</span><span>Status</span>
           </div>
           {filtered.map(item => {
@@ -1235,7 +1369,7 @@ function App() {
             const isOpen = selected.has(item.id);
             return (
               <div key={item.id} style={{marginBottom: 4}}>
-                <div onClick={() => setSelected(prev => { const next = new Set(prev); next.has(item.id) ? next.delete(item.id) : next.add(item.id); return next; })} style={{display: "grid", gridTemplateColumns: "60px 1fr 90px 70px 70px 80px 110px", gap: 6, padding: "9px 10px", border: "1px solid #e8e8e5", borderRadius: isOpen ? "8px 8px 0 0" : "8px", cursor: "pointer", alignItems: "center", background: isOpen ? "#f0f6ff" : "#fff"}}>
+                <div onClick={() => setSelected(prev => { const next = new Set(prev); next.has(item.id) ? next.delete(item.id) : next.add(item.id); return next; })} className="queue-row" style={{display: "grid", gridTemplateColumns: "60px 1fr 90px 70px 70px 80px 110px", gap: 6, padding: "9px 10px", border: "1px solid #e8e8e5", borderRadius: isOpen ? "8px 8px 0 0" : "8px", cursor: "pointer", alignItems: "center", background: isOpen ? "#f0f6ff" : "#fff"}}>
                   <span style={{fontSize: 11, fontWeight: 600, color: "#534AB7", whiteSpace: "nowrap"}}>{item.queueLabel || ""}</span>
                   <span style={{overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12}}>
                     {item.result.complianceRisk && <span style={{display: "inline-block", fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 4, border: "1px solid #F09595", color: "#A32D2D", background: "#FCEBEB", marginRight: 5, verticalAlign: "middle", letterSpacing: ".03em"}}>Compliance Risk</span>}
@@ -1311,16 +1445,15 @@ function App() {
 
   /* ── WRITEUP VIEW ── */
   const writeupView = () => (
-    <div style={{maxWidth: 740}}>
-      <div style={{marginBottom: 20, paddingBottom: 14, borderBottom: "1px solid #e8e8e5"}}>
-        <p style={{fontSize: 12, color: "#555", fontWeight: 600}}>Prepared by Esther Ajari</p>
-        <p style={{fontSize: 11, color: "#999"}}>Founder's Office Case Study Submission</p>
+    <div id="writeup-print-area" style={{maxWidth: 740}}>
+      <div style={{marginBottom: 14, paddingBottom: 10, borderBottom: "1px solid #e8e8e5"}}>
+        <p className="writeup-title" style={{fontSize: 48, fontWeight: 700, color: "#1a1a1a", marginBottom: 4, lineHeight: 1, letterSpacing: "-.03em"}}>Bug Triage Console</p>
+        <p style={{fontSize: 15, color: "#555", fontWeight: 600, marginBottom: 1}}>Prepared by Esther Ajari</p>
+        <p style={{fontSize: 13, color: "#999", marginBottom: 0}}>Founder's Office Case Study Submission</p>
       </div>
-      <h2 style={{fontSize: 17, fontWeight: 700, marginBottom: 4}}>System Writeup</h2>
-      <p style={{fontSize: 12, color: "#888", marginBottom: 22}}>Bucket definitions, severity rubric, compliance and regulatory risk, and routing philosophy.</p>
 
-      <SectionLabel>Bucket Definitions</SectionLabel>
-      <div style={{marginBottom: 18}}>
+      <h3 className="writeup-heading">Bucket Definitions</h3>
+      <div className="bucket-grid" style={{marginBottom: 18}}>
         {BUCKET_RULES.map(b => (
           <div key={b.id} style={{marginBottom: 10, paddingLeft: 10, borderLeft: `3px solid ${BKT_COLOR[b.id].b}`}}>
             <p style={{fontWeight: 600, fontSize: 13, marginBottom: 2}}>{b.label}</p>
@@ -1329,8 +1462,8 @@ function App() {
         ))}
       </div>
 
-      <SectionLabel>Severity Rubric</SectionLabel>
-      <div style={{marginBottom: 18, display: "flex", flexDirection: "column", gap: 8}}>
+      <h3 className="writeup-heading">Severity Rubric</h3>
+      <div className="sev-grid" style={{marginBottom: 18, display: "flex", flexDirection: "column", gap: 8}}>
         {SEV_RULES.map(s => <SeverityCard key={s.level} sev={s} />)}
       </div>
       <div style={{marginBottom: 18, paddingLeft: 10, borderLeft: "3px solid #e8e8e5"}}>
@@ -1339,7 +1472,7 @@ function App() {
         </p>
       </div>
 
-      <SectionLabel>Compliance and Regulatory Risk</SectionLabel>
+      <h3 className="writeup-heading">Compliance and Regulatory Risk</h3>
       <div style={{marginBottom: 18, paddingLeft: 10, borderLeft: "3px solid #F09595"}}>
         <p style={{fontSize: 12, color: "#555", lineHeight: 1.7, marginBottom: 6}}>
           Reports that contain language associated with unlawful or non-compliant agent behavior are flagged with a compliance risk banner before any other output. The system uses phrase-level matching to avoid false positives from partial word matches.
@@ -1352,17 +1485,23 @@ function App() {
         </p>
       </div>
 
-      <SectionLabel>Routing Philosophy</SectionLabel>
+      <h3 className="writeup-heading">Routing Philosophy</h3>
       <div style={{marginBottom: 18, fontSize: 13, lineHeight: 1.75, color: "#333"}}>
-        <p style={{marginBottom: 8}}>Each report is scored across the five buckets. The highest-scoring bucket becomes the primary owner. A secondary bucket is added when another area also has meaningful evidence , for example, a multilingual call may involve both a speech recognition failure (STT) and a language routing failure (LLM). When a secondary bucket is present, the routing section shows both teams and provides separate information checklists for each.</p>
+        <p style={{marginBottom: 8}}>Each report is scored across the five buckets. The highest-scoring bucket becomes the primary owner. Secondary buckets are assigned when a second ownership path has meaningful evidence , not arbitrarily. A multilingual call may involve both a transcription failure (STT) and a language routing failure (LLM). A duplicate transaction may involve both Infrastructure and Post-call Process. When a secondary bucket is present, the routing section shows both teams with separate escalation checklists.</p>
 
-        <p style={{marginBottom: 8}}>Secondary buckets do not automatically reduce confidence. If the primary bucket clearly leads and the secondary is a downstream consequence rather than a competing explanation, confidence stays High. Confidence drops to Medium when it is genuinely unclear which team owns the root cause.</p>
+        <p style={{marginBottom: 8}}>Secondary buckets do not automatically reduce confidence. If the primary bucket clearly leads and the secondary reflects a downstream consequence rather than a competing explanation, confidence stays High. Confidence drops to Medium when ownership is genuinely ambiguous.</p>
 
-        <p style={{marginBottom: 8}}>Classification Evidence and Severity Evidence are kept separate on purpose. Classification Evidence answers why the report belongs to a given bucket. Severity Evidence answers why it deserves a particular urgency level. For LLM reports, classification evidence uses plain-language failure descriptions rather than matched phrases, so a reviewer can immediately understand what type of reasoning or output failure occurred.</p>
+        <p style={{marginBottom: 8}}>Classification Evidence and Severity Evidence are kept separate on purpose. Classification Evidence answers why the report belongs to a given bucket. Severity Evidence answers why it deserves a particular urgency level. For LLM reports, classification evidence uses interpreted failure categories , such as "Wrong account reasoning" or "Repeated reasoning loop" , so reviewers see the type of failure, not just matched phrases.</p>
 
-        <p style={{marginBottom: 8}}>Confidence is shown in three parts: Bucket Confidence reflects certainty in which team owns the issue, Severity Confidence reflects certainty in urgency and scope, and Overall Confidence is the lower of the two. A strong bucket classification does not mask uncertain severity, and vice versa.</p>
+        <p style={{marginBottom: 8}}>Confidence is shown in three parts. Bucket Confidence reflects certainty in ownership. Severity Confidence reflects certainty in urgency and scope. Overall Confidence is the lower of the two , a strong bucket classification does not mask uncertain severity.</p>
 
-        <p>Every classification is a recommendation. A reviewer must confirm and route the report before it enters the queue. Any change to the system recommendation requires a written justification, which is recorded alongside the original recommendation and included in the CSV export so the decision can be reviewed later.</p>
+        <p>Every classification is a recommendation. A reviewer confirms and routes each report before it enters the queue. Any change requires a written justification, which is recorded alongside the original recommendation and included in the CSV export. The audit trail is permanent. The Key Information checklists are written for CS reviewers, not engineers , they ask for call IDs, observed behavior, and time windows, not configuration or deployment details.</p>
+      </div>
+
+      <h3 className="writeup-heading">Limitations</h3>
+      <div style={{marginBottom: 18, fontSize: 13, lineHeight: 1.75, color: "#333"}}>
+        <p style={{marginBottom: 10}}>Classification is rule-based rather than learned from historical data. The system cannot improve its routing recommendations from resolved tickets over time, and impact estimates are based on report content and reviewer input rather than live error rates or affected customer counts.</p>
+        <p>Future versions could learn from reviewer decisions and integrate with ticketing and observability systems to improve both routing accuracy and confidence calibration over time.</p>
       </div>
     </div>
   );
@@ -1401,7 +1540,7 @@ function App() {
     ];
 
     return (
-      <div style={{maxWidth: 700}}>
+    <div id="log-print-area" style={{maxWidth: 700}}>
         <div style={{marginBottom: 20, paddingBottom: 14, borderBottom: "1px solid #e8e8e5", display: "flex", gap: 32}}>
           <div>
             <p style={{fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: "#999", marginBottom: 2}}>Project Author</p>
@@ -1412,14 +1551,11 @@ function App() {
             <p style={{fontSize: 13, fontWeight: 600, color: "#333"}}>Claude Code</p>
           </div>
         </div>
-        <h2 style={{fontSize: 17, fontWeight: 700, marginBottom: 4}}>AI Usage Log</h2>
-        <p style={{fontSize: 12, color: "#888", marginBottom: 8}}>Claude Code was used as the primary vibe-coding tool for this prototype.</p>
-        <p style={{fontSize: 12, color: "#888", marginBottom: 22}}>This log summarizes what was generated with AI, what was reviewed and refined manually, and which design approaches were considered and ultimately rejected.</p>
         {sections.map(sec => (
           <div key={sec.heading} style={{marginBottom: 24}}>
             <div style={{display: "flex", alignItems: "center", gap: 8, marginBottom: 12}}>
               <div style={{width: 26, height: 26, borderRadius: 6, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, background: sec.bg, color: sec.color}}>{sec.icon}</div>
-              <p style={{fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: sec.color, margin: 0}}>{sec.heading}</p>
+              <p className="log-section-heading" style={{fontSize: 17, fontWeight: 700, color: "#1a1a1a", letterSpacing: "-.01em", margin: 0}}>{sec.heading}</p>
             </div>
             <div style={{display: "flex", flexDirection: "column", gap: 0}}>
               {sec.entries.map((text, i) => (
@@ -1437,7 +1573,7 @@ function App() {
 
   /* ── RENDER ── */
   return (
-    <div style={{minHeight: "100vh", background: "#f4f3f0"}}>
+    <div data-view={view} style={{minHeight: "100vh", background: "#f4f3f0"}}>
       <div style={{maxWidth: 900, margin: "0 auto", padding: "24px 20px 80px"}}>
         <div style={{display: "flex", alignItems: "center", gap: 10, marginBottom: 20}}>
           <div style={{width: 32, height: 32, borderRadius: 8, background: "#185FA5", display: "flex", alignItems: "center", justifyContent: "center"}}>
